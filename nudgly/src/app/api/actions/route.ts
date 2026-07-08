@@ -1,6 +1,30 @@
 import { NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
-import { toolRegistry } from "@/lib/agent/tools";
+import {
+  toolRegistry,
+  type ToolArgs,
+  type ToolExecutionResult,
+} from "@/lib/agent/tools";
+
+type ActionDecision = "approved" | "rejected";
+
+const parseActionRequest = (body: unknown) => {
+  if (!body || typeof body !== "object") {
+    return { actionId: null, decision: null };
+  }
+
+  const payload = body as Record<string, unknown>;
+  const actionId =
+    typeof payload.actionId === "string" && payload.actionId.trim()
+      ? payload.actionId.trim()
+      : null;
+  const decision: ActionDecision | null =
+    payload.decision === "approved" || payload.decision === "rejected"
+      ? payload.decision
+      : null;
+
+  return { actionId, decision };
+};
 
 export async function POST(request: Request) {
   try {
@@ -13,8 +37,17 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
-    let { actionId, decision } = await request.json();
+    const parsedRequest = parseActionRequest(await request.json());
+    let actionId = parsedRequest.actionId;
+    const decision = parsedRequest.decision;
     console.log("Received decision request:", { actionId, decision });
+
+    if (!decision) {
+      return NextResponse.json(
+        { error: "Decision must be either approved or rejected." },
+        { status: 400 },
+      );
+    }
 
     // IF NO ACTION ID IS PASSED, AUTOMATICALLY FIND THE LATEST PENDING ONE ON THE SERVER
     if (!actionId) {
@@ -33,7 +66,17 @@ export async function POST(request: Request) {
           { status: 404 },
         );
       }
-      actionId = latestAction.id;
+      actionId =
+        typeof latestAction.id === "string" && latestAction.id.trim()
+          ? latestAction.id
+          : null;
+
+      if (!actionId) {
+        return NextResponse.json(
+          { error: "Pending action is missing a valid id." },
+          { status: 500 },
+        );
+      }
     }
 
     // 1. Fetch the specific action to process
@@ -67,14 +110,22 @@ export async function POST(request: Request) {
     }
 
     // 3. If approved, run the tool execution logic securely on the server
-    const targetTool = toolRegistry[action.tool_name];
-    let executionResult = {
+    const toolName =
+      typeof action.tool_name === "string" ? action.tool_name : "";
+    const targetTool = toolRegistry[toolName];
+    const actionArgs =
+      action.arguments &&
+      typeof action.arguments === "object" &&
+      !Array.isArray(action.arguments)
+        ? (action.arguments as ToolArgs)
+        : {};
+    let executionResult: ToolExecutionResult = {
       success: false,
       error: "Tool not found in registry",
     };
 
     if (targetTool) {
-      executionResult = await targetTool.execute(user.id, action.arguments);
+      executionResult = await targetTool.execute(user.id, actionArgs);
     }
 
     // 4. Update the action status to approved
@@ -87,11 +138,14 @@ export async function POST(request: Request) {
     await supabase.from("chat_messages").insert({
       user_id: user.id,
       sender: "agent",
-      content: `✅ Action Approved & Executed: ${executionResult.success ? "Success" : "Failed"}. ${action.tool_name} completed.`,
+      content: `✅ Action Approved & Executed: ${executionResult.success ? "Success" : "Failed"}. ${toolName} completed.`,
     });
 
     return NextResponse.json({ success: true, result: executionResult });
-  } catch (error: any) {
-    return NextResponse.json({ error: error.message }, { status: 500 });
+  } catch (error) {
+    const message =
+      error instanceof Error ? error.message : "Internal Server Error";
+
+    return NextResponse.json({ error: message }, { status: 500 });
   }
 }
