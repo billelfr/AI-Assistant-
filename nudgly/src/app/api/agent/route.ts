@@ -139,6 +139,19 @@ export async function POST(request: Request) {
         // Otherwise, execute non-gated tools (like create_task) automatically
         const toolResult = await targetTool.execute(userId, toolArgs);
 
+        if (toolName === "list_tasks" && typeof toolResult.displayText === "string") {
+          const formattedReply = toolResult.displayText;
+
+          await supabase.from("chat_messages").insert({
+            user_id: userId,
+            sender: "agent",
+            content: formattedReply,
+            channel,
+          });
+
+          return NextResponse.json({ reply: formattedReply });
+        }
+
         contents.push({
           role: "model",
           parts: [{ functionCall: currentCall }],

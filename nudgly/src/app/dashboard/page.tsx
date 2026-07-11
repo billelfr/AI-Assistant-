@@ -49,6 +49,31 @@ const formatTaskDueLabel = (value?: string | null) => {
 const formatTaskStatus = (status?: string | null) =>
   status ? status.replace(/_/g, " ") : "pending";
 
+const normalizePhoneNumber = (value: string) => {
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return "";
+  }
+
+  const cleaned = trimmed.replace(/[^\d+]/g, "");
+  const digits = cleaned.replace(/\D/g, "");
+
+  return cleaned.startsWith("+") ? `+${digits}` : digits;
+};
+
+const buildWhatsAppLink = (value: string) => {
+  const normalized = normalizePhoneNumber(value);
+  if (!normalized) {
+    return "https://wa.me/";
+  }
+
+  const digits = normalized.startsWith("+")
+    ? normalized.slice(1)
+    : normalized;
+
+  return `https://wa.me/${digits}`;
+};
+
 const getStatusClassName = (status?: string | null) => {
   switch (status) {
     case "completed":
@@ -74,6 +99,11 @@ export default function DashboardPage() {
   const [taskViewMode, setTaskViewMode] = useState<TaskViewMode>("list");
   const [tasksLoading, setTasksLoading] = useState(false);
   const [tasksError, setTasksError] = useState<string | null>(null);
+  const [linkedPhoneNumber, setLinkedPhoneNumber] = useState("");
+  const [phoneNumberInput, setPhoneNumberInput] = useState("");
+  const [phoneNumberLoading, setPhoneNumberLoading] = useState(false);
+  const [phoneNumberError, setPhoneNumberError] = useState<string | null>(null);
+  const [phoneNumberSuccess, setPhoneNumberSuccess] = useState<string | null>(null);
 
   const supabase = useMemo(() => createClient(), []);
   const router = useRouter();
@@ -116,6 +146,16 @@ export default function DashboardPage() {
       setUserEmail(user.email || "User");
       setUserId(user.id);
       await refreshTasks(user.id);
+
+      const { data: profileData } = await supabase
+        .from("profiles")
+        .select("phone_number")
+        .eq("id", user.id)
+        .maybeSingle();
+
+      const existingPhoneNumber = profileData?.phone_number?.toString() || "";
+      setLinkedPhoneNumber(existingPhoneNumber);
+      setPhoneNumberInput(existingPhoneNumber);
 
       // Load existing message history
       const { data: history } = await supabase
@@ -290,6 +330,47 @@ export default function DashboardPage() {
     }
   };
 
+  const handleSavePhoneNumber = async (e: React.FormEvent) => {
+    e.preventDefault();
+
+    if (!userId) {
+      setPhoneNumberError("You need to be signed in before linking a phone number.");
+      return;
+    }
+
+    const normalizedPhoneNumber = normalizePhoneNumber(phoneNumberInput);
+    if (!normalizedPhoneNumber) {
+      setPhoneNumberError("Please enter a phone number before saving.");
+      setPhoneNumberSuccess(null);
+      return;
+    }
+
+    setPhoneNumberLoading(true);
+    setPhoneNumberError(null);
+    setPhoneNumberSuccess(null);
+
+    try {
+      const { error } = await supabase
+        .from("profiles")
+        .upsert({ id: userId, phone_number: normalizedPhoneNumber }, { onConflict: "id" });
+
+      if (error) {
+        throw error;
+      }
+
+      setLinkedPhoneNumber(normalizedPhoneNumber);
+      setPhoneNumberInput(normalizedPhoneNumber);
+      setPhoneNumberSuccess("Phone number linked successfully.");
+    } catch (error: unknown) {
+      console.error("❌ Failed to save phone number:", error);
+      setPhoneNumberError(
+        error instanceof Error ? error.message : "Unable to save the phone number right now.",
+      );
+    } finally {
+      setPhoneNumberLoading(false);
+    }
+  };
+
   const handleLogout = async () => {
     await supabase.auth.signOut();
     router.push("/login");
@@ -351,11 +432,10 @@ export default function DashboardPage() {
                 return (
                   <div
                     key={index}
-                    className={`flex max-w-[88%] flex-col rounded-lg px-4 py-3 shadow-sm sm:max-w-[75%] ${
-                      msg.sender === "user"
+                    className={`flex max-w-[88%] flex-col rounded-lg px-4 py-3 shadow-sm sm:max-w-[75%] ${msg.sender === "user"
                         ? "bg-indigo-600 text-white ml-auto rounded-br-none"
                         : "bg-gray-800 border border-gray-700 text-gray-200 mr-auto rounded-bl-none"
-                    }`}
+                      }`}
                   >
                     <span className="text-[10px] uppercase font-bold tracking-wider opacity-60 mb-1">
                       {msg.sender === "user" ? "You" : "Nudgly"}
@@ -385,7 +465,7 @@ export default function DashboardPage() {
                                 const errorData = await res.json();
                                 throw new Error(
                                   errorData.error ||
-                                    "Backend failed to process approval",
+                                  "Backend failed to process approval",
                                 );
                               }
 
@@ -432,7 +512,7 @@ export default function DashboardPage() {
                                 const errorData = await res.json();
                                 throw new Error(
                                   errorData.error ||
-                                    "Backend failed to process rejection",
+                                  "Backend failed to process rejection",
                                 );
                               }
 
@@ -485,6 +565,69 @@ export default function DashboardPage() {
           </section>
 
           <aside className="border-t border-gray-800 pt-4 lg:min-h-0 lg:overflow-y-auto lg:border-l lg:border-t-0 lg:pl-4 lg:pt-0">
+            <div className="mb-4 rounded-lg border border-gray-800 bg-gray-950/70 p-4">
+              <div className="flex items-center justify-between gap-2">
+                <div>
+                  <h2 className="text-sm font-semibold text-white">WhatsApp</h2>
+                  <p className="mt-1 text-xs text-gray-400">
+                    Link your phone number so WhatsApp messages can reach this workspace.
+                  </p>
+                </div>
+              </div>
+
+              <form onSubmit={handleSavePhoneNumber} className="mt-3 space-y-2">
+                <label className="text-[11px] font-semibold uppercase tracking-[0.2em] text-gray-500">
+                  Phone number
+                </label>
+                <input
+                  value={phoneNumberInput}
+                  onChange={(event) => {
+                    setPhoneNumberInput(event.target.value);
+                    if (phoneNumberError) {
+                      setPhoneNumberError(null);
+                    }
+                  }}
+                  placeholder="+1 555 123 4567"
+                  className="w-full rounded border border-gray-700 bg-gray-900 px-3 py-2 text-sm text-white outline-none ring-0 placeholder:text-gray-500 focus:border-indigo-500"
+                />
+                <button
+                  type="submit"
+                  disabled={phoneNumberLoading}
+                  className="min-h-11 w-full rounded bg-indigo-600 px-3 py-2 text-sm font-semibold text-white transition hover:bg-indigo-500 disabled:cursor-not-allowed disabled:opacity-60"
+                >
+                  {phoneNumberLoading ? "Saving..." : "Link phone number"}
+                </button>
+              </form>
+
+              {phoneNumberError ? (
+                <p className="mt-2 text-sm text-rose-400">{phoneNumberError}</p>
+              ) : null}
+
+              {phoneNumberSuccess ? (
+                <p className="mt-2 text-sm text-emerald-400">{phoneNumberSuccess}</p>
+              ) : null}
+
+              {linkedPhoneNumber ? (
+                <div className="mt-3 flex flex-wrap items-center justify-between gap-2 rounded border border-emerald-500/20 bg-emerald-500/10 px-3 py-2">
+                  <span className="text-sm text-emerald-300">
+                    Linked: {linkedPhoneNumber}
+                  </span>
+                  <a
+                    href={buildWhatsAppLink(linkedPhoneNumber)}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="text-sm font-semibold text-emerald-300 transition hover:text-emerald-200"
+                  >
+                    Open WhatsApp
+                  </a>
+                </div>
+              ) : (
+                <p className="mt-3 text-sm text-gray-500">
+                  Save a number above to start a WhatsApp chat from this dashboard.
+                </p>
+              )}
+            </div>
+
             <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between lg:flex-col">
               <div>
                 <h2 className="text-lg font-semibold text-white">Tasks</h2>
@@ -501,11 +644,10 @@ export default function DashboardPage() {
                     type="button"
                     aria-pressed={taskViewMode === "list"}
                     onClick={() => setTaskViewMode("list")}
-                    className={`min-h-11 rounded px-3 text-sm font-medium transition ${
-                      taskViewMode === "list"
+                    className={`min-h-11 rounded px-3 text-sm font-medium transition ${taskViewMode === "list"
                         ? "bg-gray-700 text-white"
                         : "text-gray-400 hover:bg-gray-800 hover:text-gray-200"
-                    }`}
+                      }`}
                   >
                     List
                   </button>
@@ -513,11 +655,10 @@ export default function DashboardPage() {
                     type="button"
                     aria-pressed={taskViewMode === "cards"}
                     onClick={() => setTaskViewMode("cards")}
-                    className={`min-h-11 rounded px-3 text-sm font-medium transition ${
-                      taskViewMode === "cards"
+                    className={`min-h-11 rounded px-3 text-sm font-medium transition ${taskViewMode === "cards"
                         ? "bg-gray-700 text-white"
                         : "text-gray-400 hover:bg-gray-800 hover:text-gray-200"
-                    }`}
+                      }`}
                   >
                     Cards
                   </button>

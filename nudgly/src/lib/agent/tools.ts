@@ -1,4 +1,5 @@
-import { createClient } from "@/lib/supabase/server";
+import { createClient as createSupabaseClient } from "@/lib/supabase/server";
+import { createClient as createSupabaseAdminClient } from "@supabase/supabase-js";
 
 type ToolParameterSchema = {
   type: string;
@@ -50,6 +51,60 @@ const getStringArg = (args: ToolArgs, key: string) => {
   return typeof value === "string" && value.trim() ? value.trim() : null;
 };
 
+const formatTaskDueLabel = (value?: string | null) => {
+  if (!value) {
+    return "";
+  }
+
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return "";
+  }
+
+  return ` • due ${date.toLocaleString([], {
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  })}`;
+};
+
+const formatTaskListDisplay = (tasks: Array<Record<string, unknown>>) => {
+  if (!tasks.length) {
+    return "You don’t have any tasks yet. I can help you add one.";
+  }
+
+  const lines = ["Here are your current tasks:"];
+
+  tasks.forEach((task, index) => {
+    const title = typeof task.title === "string" && task.title.trim() ? task.title.trim() : "Untitled task";
+    const description = typeof task.description === "string" && task.description.trim() ? task.description.trim() : "";
+    const dueLabel = formatTaskDueLabel(typeof task.due_at === "string" ? task.due_at : null);
+    const status = typeof task.status === "string" && task.status.trim() ? task.status.trim().toLowerCase() : "pending";
+    const statusLabel = status && status !== "pending" ? ` • ${status}` : "";
+
+    lines.push(`${index + 1}. ${title}${statusLabel}${dueLabel}`);
+    if (description) {
+      lines.push(`   ${description}`);
+    }
+  });
+
+  return lines.join("\n");
+};
+
+const getToolSupabaseClient = async () => {
+  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
+  const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+
+  if (supabaseUrl && serviceRoleKey) {
+    return createSupabaseAdminClient(supabaseUrl, serviceRoleKey, {
+      auth: { autoRefreshToken: false, persistSession: false },
+    });
+  }
+
+  return createSupabaseClient();
+};
+
 // 2. Implement the concrete tools inside our registry object
 export const toolRegistry: Record<string, ToolDefinition> = {
   create_task: {
@@ -89,7 +144,7 @@ export const toolRegistry: Record<string, ToolDefinition> = {
         return { success: false, error: "Task title is required." };
       }
 
-      const supabase = await createClient();
+      const supabase = await getToolSupabaseClient();
 
       const { data, error } = await supabase
         .from("tasks")
@@ -124,7 +179,7 @@ export const toolRegistry: Record<string, ToolDefinition> = {
       },
     },
     execute: async (userId): Promise<TaskListResult> => {
-      const supabase = await createClient();
+      const supabase = await getToolSupabaseClient();
 
       const { data, error } = await supabase
         .from("tasks")
@@ -142,14 +197,13 @@ export const toolRegistry: Record<string, ToolDefinition> = {
         };
       }
 
-      const tasks = data ?? [];
+      const tasks = (data ?? []) as Array<Record<string, unknown>>;
+      const displayText = formatTaskListDisplay(tasks);
 
       return {
         success: true,
-        message:
-          tasks.length === 0
-            ? "You do not have any tasks yet."
-            : `Found ${tasks.length} task${tasks.length === 1 ? "" : "s"}.`,
+        message: displayText,
+        displayText,
         tasks,
       };
     },
@@ -167,7 +221,7 @@ export const toolRegistry: Record<string, ToolDefinition> = {
       },
     },
     execute: async (userId) => {
-      const supabase = await createClient();
+      const supabase = await getToolSupabaseClient();
       const { error } = await supabase
         .from("tasks")
         .delete()
@@ -183,116 +237,92 @@ export const toolRegistry: Record<string, ToolDefinition> = {
     },
   },
 
-  create_calendar_event: {
+  schedule_telegram_alert: {
+    isGated: false,
     declaration: {
-      name: "create_calendar_event",
-      description: "Schedules a new meeting or event on the user's calendar.",
+      name: "schedule_telegram_alert",
+      description: "Schedules a Telegram message reminder to be sent at a specific future date and time.",
       parameters: {
         type: "object",
         properties: {
-          title: {
+          message: { type: "string", description: "The message body to send to Telegram." },
+          scheduled_for: {
             type: "string",
-            description: "The name of the meeting or event.",
-          },
-          start_time: {
-            type: "string",
-            description: "ISO string format of when the event starts.",
-          },
-          end_time: {
-            type: "string",
-            description: "ISO string format of when the event ends.",
-          },
-          description: {
-            type: "string",
-            description: "Optional notes or context about the event.",
-          },
+            description: "ISO-8601 string representing the exact time to send. Always compute this relative to the current time."
+          }
         },
-        required: ["title", "start_time", "end_time"],
-      },
-    },
-    execute: async (
-      userId: string,
-      args: ToolArgs,
-    ): Promise<CalendarToolResult> => {
-      try {
-        const title = getStringArg(args, "title");
-        const startTime = getStringArg(args, "start_time");
-        const endTime = getStringArg(args, "end_time");
-        const description = getStringArg(args, "description");
-
-        if (!userId) {
-          return {
-            success: false,
-            message: "Calendar event could not be scheduled.",
-            error: "Missing user id.",
-          };
-        }
-
-        if (!title || !startTime || !endTime) {
-          return {
-            success: false,
-            message: "Calendar event could not be scheduled.",
-            error: "Missing required calendar event fields.",
-          };
-        }
-
-        const startDate = new Date(startTime);
-        const endDate = new Date(endTime);
-
-        if (
-          Number.isNaN(startDate.getTime()) ||
-          Number.isNaN(endDate.getTime()) ||
-          endDate <= startDate
-        ) {
-          return {
-            success: false,
-            message: "Calendar event could not be scheduled.",
-            error: "Invalid calendar event time range.",
-          };
-        }
-
-        const supabase = await createClient();
-
-        const { data, error } = await supabase
-          .from("calendar_events")
-          .insert({
-            user_id: userId,
-            title,
-            start_time: startTime,
-            end_time: endTime,
-            description,
-          })
-          .select()
-          .single();
-
-        if (error) {
-          console.log("❌ CALENDAR EVENT INSERTION FAILED:", error);
-          return {
-            success: false,
-            message: "Calendar event could not be scheduled.",
-            error: error.message,
-          };
-        }
-
-        console.log("✅ CALENDAR EVENT INSERTION SUCCESS:", data);
-        return {
-          success: true,
-          message: `Event "${title}" successfully added to your calendar.`,
-          event: data,
-        };
-      } catch (error) {
-        const message =
-          error instanceof Error ? error.message : "Unknown calendar error.";
-
-        console.log("❌ CALENDAR EVENT TOOL CRASH:", error);
-        return {
-          success: false,
-          message: "Calendar event could not be scheduled.",
-          error: message,
-        };
+        required: ["message", "scheduled_for"]
       }
     },
-  },
+    execute: async (userId: string, args: ToolArgs): Promise<ToolExecutionResult> => {
+      try {
+        const message = getStringArg(args, "message");
+        const scheduled_for = getStringArg(args, "scheduled_for");
+
+        if (!message || !scheduled_for) {
+          return { success: false, error: "Both 'message' and 'scheduled_for' are required." };
+        }
+
+        // Interpret timezone-less datetimes as Africa/Algiers (UTC+1).
+        // If the provided string already includes timezone info (Z or +HH[:MM]/-HH[:MM]),
+        // parse directly. Otherwise, parse the date/time components and treat them as
+        // Algeria local time then convert to a UTC instant for storage.
+        const tzRegex = /[zZ]|[+\-]\d{2}(:?\d{2})?$/;
+        const naiveIsoRegex = /^(\d{4})-(\d{2})-(\d{2})(?:[T\s](\d{2}):(\d{2})(?::(\d{2}))?)?$/;
+
+        let scheduledDate: Date | null = null;
+        if (tzRegex.test(scheduled_for)) {
+          scheduledDate = new Date(scheduled_for);
+        } else {
+          const m = scheduled_for.match(naiveIsoRegex);
+          if (!m) {
+            return { success: false, error: "'scheduled_for' must be an ISO date or datetime (e.g. 2026-07-11T09:00)." };
+          }
+
+          const year = Number(m[1]);
+          const month = Number(m[2]);
+          const day = Number(m[3]);
+          const hour = Number(m[4] ?? "0");
+          const minute = Number(m[5] ?? "0");
+          const second = Number(m[6] ?? "0");
+
+          // Algeria is UTC+1 and does not observe DST.
+          const ALGIERS_OFFSET_HOURS = 1;
+
+          // Create a UTC timestamp from the Algeria-local components by subtracting the offset.
+          const utcMillis = Date.UTC(year, month - 1, day, hour, minute, second) - ALGIERS_OFFSET_HOURS * 3600_000;
+          scheduledDate = new Date(utcMillis);
+        }
+
+        if (!scheduledDate || Number.isNaN(scheduledDate.getTime())) {
+          return { success: false, error: "'scheduled_for' could not be parsed as a valid datetime." };
+        }
+
+        const scheduledUtcIso = scheduledDate.toISOString();
+
+        const supabase = await getToolSupabaseClient();
+
+        const { data, error } = await supabase.from("scheduled_telegram_alerts").insert({
+          user_id: userId,
+          message,
+          // store normalized UTC ISO string so cron worker can compare against server time
+          scheduled_for: scheduledUtcIso,
+          status: "pending",
+        }).select().single();
+
+        if (error) throw error;
+
+        return {
+          success: true,
+          message: `I have scheduled your Telegram notification for: ${scheduledDate.toLocaleString()}`,
+          alert: data,
+        };
+      } catch (err: any) {
+        return { success: false, error: err?.message ?? String(err) };
+      }
+    }
+  }
+
 };
 
 // Helper utility to export all tool declarations formatted directly for the Gemini SDK

@@ -2,6 +2,12 @@ import { createServerClient } from "@supabase/ssr";
 import { NextResponse, type NextRequest } from "next/server";
 
 export async function middleware(request: NextRequest) {
+
+ // Direct early-exit to keep Webhook requests secure and fast
+  if (request.nextUrl.pathname.startsWith("/api/webhook/whatsapp")) {
+    return NextResponse.next();
+  }
+
   let supabaseResponse = NextResponse.next({
     request,
   });
