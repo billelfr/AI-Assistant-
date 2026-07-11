@@ -323,6 +323,8 @@ export const toolRegistry: Record<string, ToolDefinition> = {
     }
   }
 
+  
+
 };
 
 // Helper utility to export all tool declarations formatted directly for the Gemini SDK
